@@ -166,6 +166,7 @@ module.exports.statusPageSocketHandler = (socket) => {
             statusPage.show_powered_by = config.showPoweredBy;
             statusPage.show_only_last_heartbeat = config.showOnlyLastHeartbeat;
             statusPage.show_certificate_expiry = config.showCertificateExpiry;
+            statusPage.heartbeat_bar_days = Math.max(0, Math.min(365, parseInt(config.heartbeatBarDays) || 0));
             statusPage.modified_date = R.isoDateTime();
             statusPage.google_analytics_tag_id = config.googleAnalyticsId;
 
@@ -291,6 +292,7 @@ module.exports.statusPageSocketHandler = (socket) => {
             statusPage.theme = "auto";
             statusPage.icon = "";
             statusPage.autoRefreshInterval = 300;
+            statusPage.heartbeat_bar_days = 0;
             await R.store(statusPage);
 
             callback({

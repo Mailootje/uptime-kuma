@@ -43,6 +43,24 @@
                 </div>
 
                 <div class="my-3">
+                    <label for="heartbeat-bar-days" class="form-label">{{ $t("Heartbeat History Range") }}</label>
+                    <select
+                        id="heartbeat-bar-days"
+                        v-model.number="config.heartbeatBarDays"
+                        class="form-select"
+                        data-testid="heartbeat-bar-days-select"
+                    >
+                        <option :value="0">{{ $t("Heartbeat History Range Auto") }}</option>
+                        <option v-for="days in heartbeatBarDayOptions" :key="days" :value="days">
+                            {{ $t("Last {0} days", [days]) }}
+                        </option>
+                    </select>
+                    <div class="form-text">
+                        {{ $t("Heartbeat History Range Description") }}
+                    </div>
+                </div>
+
+                <div class="my-3">
                     <label for="switch-theme" class="form-label">{{ $t("Theme") }}</label>
                     <select id="switch-theme" v-model="config.theme" class="form-select" data-testid="theme-select">
                         <option value="auto">{{ $t("Auto") }}</option>
@@ -334,7 +352,13 @@
                     👀 {{ $t("statusPageNothing") }}
                 </div>
 
-                <PublicGroupList :edit-mode="enableEditMode" :show-tags="config.showTags" :show-certificate-expiry="config.showCertificateExpiry" :show-only-last-heartbeat="config.showOnlyLastHeartbeat" />
+                <PublicGroupList
+                    :edit-mode="enableEditMode"
+                    :show-tags="config.showTags"
+                    :show-certificate-expiry="config.showCertificateExpiry"
+                    :show-only-last-heartbeat="config.showOnlyLastHeartbeat"
+                    :heartbeat-bar-days="config.heartbeatBarDays"
+                />
             </div>
 
             <footer class="mt-5 mb-4">
@@ -457,6 +481,8 @@ export default {
             updateCountdown: null,
             updateCountdownText: null,
             loading: true,
+            heartbeatBarDayOptions: [ 7, 30, 60, 90, 180, 365 ],
+            heartbeatBarMaxBeat: null,
         };
     },
     computed: {
@@ -625,6 +651,10 @@ export default {
                     if (res.ok) {
                         this.config = res.config;
 
+                        if (this.config.heartbeatBarDays === undefined || this.config.heartbeatBarDays === null) {
+                            this.config.heartbeatBarDays = 0;
+                        }
+
                         if (!this.config.customCSS) {
                             this.config.customCSS = "body {\n" +
                                 "  \n" +
@@ -664,6 +694,10 @@ export default {
 
         "config.title"(title) {
             document.title = title;
+        },
+
+        "config.heartbeatBarDays"() {
+            this.updateHeartbeatList(this.heartbeatBarMaxBeat);
         },
 
         "$root.monitorList"() {
@@ -713,6 +747,10 @@ export default {
                 this.config.domainNameList = [];
             }
 
+            if (this.config.heartbeatBarDays === undefined || this.config.heartbeatBarDays === null) {
+                this.config.heartbeatBarDays = 0;
+            }
+
             if (this.config.icon) {
                 this.imgDataUrl = this.config.icon;
             }
@@ -723,9 +761,11 @@ export default {
 
             this.loading = false;
 
+            this.updateHeartbeatList(this.heartbeatBarMaxBeat);
+
             // Configure auto-refresh loop
             feedInterval = setInterval(() => {
-                this.updateHeartbeatList();
+                this.updateHeartbeatList(this.heartbeatBarMaxBeat);
             }, Math.max(5, this.config.autoRefreshInterval) * 1000);
 
             this.updateUpdateTimer();
@@ -735,8 +775,6 @@ export default {
             }
             console.log(error);
         });
-
-        this.updateHeartbeatList();
 
         // Go to edit page if ?edit present
         // null means ?edit present, but no value
@@ -774,10 +812,25 @@ export default {
          * Update the heartbeat list and update favicon if necessary
          * @returns {void}
          */
-        updateHeartbeatList() {
-            // If editMode, it will use the data from websocket.
-            if (! this.editMode) {
-                axios.get("/api/status-page/heartbeat/" + this.slug).then((res) => {
+        updateHeartbeatList(maxBeat = null) {
+            if (maxBeat) {
+                this.heartbeatBarMaxBeat = maxBeat;
+            }
+
+            const params = {};
+
+            if (this.config?.heartbeatBarDays > 0) {
+                params.days = this.config.heartbeatBarDays;
+
+                if (this.heartbeatBarMaxBeat) {
+                    params.maxBeat = this.heartbeatBarMaxBeat;
+                }
+            }
+
+            const shouldFetchFromAPI = !this.editMode || this.config?.heartbeatBarDays > 0;
+
+            if (shouldFetchFromAPI) {
+                axios.get("/api/status-page/heartbeat/" + this.slug, { params }).then((res) => {
                     const { heartbeatList, uptimeList } = res.data;
 
                     this.$root.heartbeatList = heartbeatList;
@@ -801,6 +854,19 @@ export default {
                     this.lastUpdateTime = dayjs();
                     this.updateUpdateTimer();
                 });
+            }
+        },
+
+        /**
+         * Reload heartbeat data with a new bar width.
+         * @param {number} maxBeat Maximum number of beats to request
+         * @returns {void}
+         */
+        reloadHeartbeatData(maxBeat) {
+            this.heartbeatBarMaxBeat = maxBeat;
+
+            if (this.config?.heartbeatBarDays > 0) {
+                this.updateHeartbeatList(maxBeat);
             }
         },
 

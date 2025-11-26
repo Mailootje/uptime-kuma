@@ -238,7 +238,10 @@ export default {
             }
 
             // Need to calculate from actual data
-            const firstValidBeat = this.shortBeatList.at(this.numPadding);
+            const firstValidBeat = this.shortBeatList.slice(this.numPadding).find((beat) => beat && beat !== 0 && beat.time);
+            if (!firstValidBeat) {
+                return this.$t("Unknown");
+            }
             const minutes = dayjs().diff(dayjs.utc(firstValidBeat?.time), "minutes");
             return minutes > 60 ? Math.floor(minutes / 60) + "h" : minutes + "m";
         },
@@ -248,7 +251,10 @@ export default {
          * @returns {string} The elapsed time in a minutes, hours or "now".
          */
         timeSinceLastBeat() {
-            const lastValidBeat = this.shortBeatList.at(-1);
+            const lastValidBeat = [ ...this.shortBeatList ].reverse().find((beat) => beat && beat !== 0 && beat.time);
+            if (!lastValidBeat) {
+                return this.$t("Unknown");
+            }
             const seconds = dayjs().diff(dayjs.utc(lastValidBeat?.time), "seconds");
 
             let tolerance = 60 * 2; // default for when monitorList not available

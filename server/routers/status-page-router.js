@@ -4,9 +4,13 @@ const { UptimeKumaServer } = require("../uptime-kuma-server");
 const StatusPage = require("../model/status_page");
 const { allowDevAllOrigin, sendHttpError } = require("../util-server");
 const { R } = require("redbean-node");
-const { badgeConstants } = require("../../src/util");
+const { badgeConstants, DOWN, UP, MAINTENANCE } = require("../../src/util");
 const { makeBadge } = require("badge-maker");
 const { UptimeCalculator } = require("../uptime-calculator");
+const dayjs = require("dayjs");
+const utc = require("dayjs/plugin/utc");
+
+dayjs.extend(utc);
 
 let router = express.Router();
 
@@ -73,7 +77,18 @@ router.get("/api/status-page/heartbeat/:slug", cache("1 minutes"), async (reques
 
         let slug = request.params.slug;
         slug = slug.toLowerCase();
-        let statusPageID = await StatusPage.slugToID(slug);
+        const statusPage = await R.findOne("status_page", " slug = ? ", [
+            slug
+        ]);
+
+        if (!statusPage) {
+            sendHttpError(response, "Status Page Not Found");
+            return;
+        }
+
+        const statusPageID = statusPage.id;
+        const heartbeatBarDays = Math.max(0, Math.min(365, parseInt(request.query.days ?? statusPage.heartbeat_bar_days ?? 0) || 0));
+        const maxBeat = Math.max(1, Math.min(parseInt(request.query.maxBeat) || 120, 1000));
 
         let monitorIDList = await R.getCol(`
             SELECT monitor_group.monitor_id FROM monitor_group, \`group\`
@@ -85,17 +100,21 @@ router.get("/api/status-page/heartbeat/:slug", cache("1 minutes"), async (reques
         ]);
 
         for (let monitorID of monitorIDList) {
-            let list = await R.getAll(`
-                    SELECT * FROM heartbeat
-                    WHERE monitor_id = ?
-                    ORDER BY time DESC
-                    LIMIT 100
-            `, [
-                monitorID,
-            ]);
+            if (heartbeatBarDays > 0) {
+                heartbeatList[monitorID] = await buildAggregatedHeartbeatList(monitorID, heartbeatBarDays, maxBeat);
+            } else {
+                let list = await R.getAll(`
+                        SELECT * FROM heartbeat
+                        WHERE monitor_id = ?
+                        ORDER BY time DESC
+                        LIMIT 100
+                `, [
+                    monitorID,
+                ]);
 
-            list = R.convertToBeans("heartbeat", list);
-            heartbeatList[monitorID] = list.reverse().map(row => row.toPublicJSON());
+                list = R.convertToBeans("heartbeat", list);
+                heartbeatList[monitorID] = list.reverse().map(row => row.toPublicJSON());
+            }
 
             const uptimeCalculator = await UptimeCalculator.getUptimeCalculator(monitorID);
             uptimeList[`${monitorID}_24`] = uptimeCalculator.get24Hour().uptime;
@@ -146,6 +165,99 @@ router.get("/api/status-page/:slug/manifest.json", cache("1440 minutes"), async 
         sendHttpError(response, error.message);
     }
 });
+
+/**
+ * Build aggregated heartbeat-like entries for the status page timeline using stat tables.
+ * @param {number} monitorID Monitor id to load stats for
+ * @param {number} days Number of days of history to include
+ * @param {number} maxBeat Number of bars to return
+ * @returns {Promise<object[]>} Aggregated heartbeat-style list
+ */
+async function buildAggregatedHeartbeatList(monitorID, days, maxBeat) {
+    const bucketCount = Math.max(1, Math.min(maxBeat || 120, 1000));
+    const totalSeconds = days * 86400;
+    const bucketDurationSeconds = Math.max(60, Math.ceil(totalSeconds / bucketCount));
+
+    let sourceTable = "stat_hourly";
+    let tableResolution = 3600;
+
+    if (days <= 1) {
+        sourceTable = "stat_minutely";
+        tableResolution = 60;
+    } else if (days > 30) {
+        sourceTable = "stat_daily";
+        tableResolution = 86400;
+    }
+
+    // Avoid requesting buckets smaller than our source resolution
+    const normalizedBucketDuration = Math.max(bucketDurationSeconds, tableResolution);
+    const startTimestamp = Math.floor(dayjs().utc().subtract(days, "day").unix() / tableResolution) * tableResolution;
+
+    const stats = await R.getAll(`
+        SELECT timestamp, up, down, extras
+        FROM ${sourceTable}
+        WHERE monitor_id = ?
+        AND timestamp >= ?
+        ORDER BY timestamp ASC
+    `, [
+        monitorID,
+        startTimestamp
+    ]);
+
+    const beats = [];
+    let statIndex = 0;
+    let bucketStart = startTimestamp;
+
+    for (let i = 0; i < bucketCount; i++) {
+        const bucketEnd = bucketStart + normalizedBucketDuration;
+        let up = 0;
+        let down = 0;
+        let maintenance = 0;
+
+        while (statIndex < stats.length && stats[statIndex].timestamp < bucketEnd) {
+            const stat = stats[statIndex];
+            up += Number(stat.up || 0);
+            down += Number(stat.down || 0);
+
+            if (stat.extras) {
+                try {
+                    const extras = JSON.parse(stat.extras);
+                    maintenance += Number(extras?.maintenance || 0);
+                } catch (parseError) {
+                    // Ignore malformed extras JSON
+                }
+            }
+
+            statIndex++;
+        }
+
+        let beat = 0;
+
+        if (up || down || maintenance) {
+            let status = UP;
+
+            if (maintenance) {
+                status = MAINTENANCE;
+            }
+
+            if (down) {
+                status = DOWN;
+            }
+
+            beat = {
+                status,
+                time: dayjs.unix(bucketEnd).toISOString(),
+                msg: "",
+                ping: null,
+            };
+        }
+
+        beats.push(beat);
+        bucketStart = bucketEnd;
+    }
+
+    return beats;
+}
 
 // overall status-page status badge
 router.get("/api/status-page/:slug/badge", cache("5 minutes"), async (request, response) => {
